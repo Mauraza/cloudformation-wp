@@ -1,0 +1,611 @@
+Parameters:
+  BlogName:
+    Default: Bitnami
+    Description: The WordPress database name
+    Type: String
+    MinLength: "1"
+    MaxLength: "64"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9].*"
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  BlogEmail:
+    Default: user@user.es
+    Description: The WordPress database admin account password
+    Type: String
+    MinLength: "8"
+    MaxLength: "150"
+    AllowedPattern: >-
+      ^[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$
+    ConstraintDescription: must contain only alphanumeric characters.
+  BlogUser:
+    Default: user
+    Description: The WordPress admin account username for login
+    Type: String
+    MinLength: "1"
+    MaxLength: "16"
+    AllowedPattern: "[a-zA-Z][a-zA-Z0-9]*"
+    ConstraintDescription: must begin with a letter and contain only alphanumeric characters.
+  BlogPassword:
+    NoEcho: "true"
+    Description: The WordPress admin account password
+    Type: String
+    MinLength: "4"
+    MaxLength: "41"
+    AllowedPattern: "[a-zA-Z0-9].*"
+    ConstraintDescription: must contain only alphanumeric characters.
+  myKeyPair:
+    Description: Amazon EC2 Key Pair
+    Type: "AWS::EC2::KeyPair::KeyName"
+  NumberOfNodes:
+    Default: 1
+    Description: Number of instances
+    Type: Number
+    MinValue: 1
+    MaxValue: 5
+  MasterUserPassword:
+    NoEcho: "true"
+    Description: The RDS database admin account password
+    Type: String
+    MinLength: "4"
+    MaxLength: "41"
+    AllowedPattern: "[a-zA-Z0-9].*"
+    ConstraintDescription: must contain only alphanumeric characters.
+Resources:
+  RDS:
+    Type: "AWS::RDS::DBInstance"
+    Properties:
+      AllocatedStorage: "100"
+      DBInstanceClass: db.t2.micro
+      Engine: MySQL
+      EngineVersion: 5.7.22
+      Iops: "1000"
+      DBSubnetGroupName: !Ref SubnetDB
+      MasterUserPassword: !Ref MasterUserPassword
+      MasterUsername: bn_wordpress
+      DBName: bitnami_wordpress
+      VPCSecurityGroups:
+        - !GetAtt
+          - DBSecurityGroup
+          - GroupId
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 1eaa0390-5087-469d-96bf-592ec0fb0c47
+  DBSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: Open database for access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "3306"
+          ToPort: "3306"
+          SourceSecurityGroupId: !Ref InstanceSecurityGroup
+      VpcId: !Ref VPC
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: e18086cc-140c-4936-8e29-b783fb27b619
+  InstanceSecurityGroup:
+    Type: "AWS::EC2::SecurityGroup"
+    Properties:
+      GroupDescription: "Enable SSH access via port 22, and ports 3838 and 80 for Shiny"
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: "22"
+          ToPort: "22"
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: "80"
+          ToPort: "80"
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: "-1"
+          CidrIp: 0.0.0.0/0
+      VpcId: !Ref VPC
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: e4d2d873-ddda-456e-86b3-5ecc4084178f
+  LaunchConfig:
+    Type: "AWS::AutoScaling::LaunchConfiguration"
+    Properties:
+      AssociatePublicIpAddress: "true"
+      ImageId: ami-07d07c4573127707f
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      KeyName: !Ref myKeyPair
+      InstanceType: t3.medium
+      EbsOptimized: "true"
+      UserData: !Base64
+        "Fn::Sub": >
+          #!/bin/bash
+
+          export DBUSER='bn_wordpress'
+
+          export DBNAME='bitnami_wordpress'
+
+          sudo ./bitnami-wordpress-5.2.4-1-linux-x64-installer.run --mode
+          unattended --wordpress_blog_name ${BlogName} --base_mail ${BlogEmail} --base_user ${BlogUser}
+          --base_password ${BlogPassword}  --launch_cloud 0 --prefix
+          /opt/bitnami 
+
+          sudo ./opt/bitnami/ctlscript.sh start 
+
+          echo 'done'
+
+          export DBPASSWORD=$(grep -o -P "(?<=DB_PASSWORD',\s')\w+"
+          /opt/bitnami/apps/wordpress/htdocs/wp-config.php)
+
+          sudo cp /opt/bitnami/apps/wordpress/htdocs/wp-config.php
+          /opt/bitnami/apps/wordpress/htdocs/backup-wp-config.php 
+
+          sudo cp /opt/bitnami/apache2/scripts/ctl.sh /etc/init.d/ctl.sh 
+
+          sudo ln -s /etc/init.d/ctl.sh /etc/rc2.d/
+
+          sudo mv /etc/rc2.d/ctl.sh /etc/rc2.d/S01ctl.sh
+
+          mkdir backup
+
+          echo "backup"
+
+          echo "sudo /opt/bitnami/mysql/bin/mysqldump -u$DBUSER  $DBNAME
+          -p$DBPASSWORD"
+
+          sudo /opt/bitnami/mysql/bin/mysqldump -u$DBUSER  $DBNAME -hlocalhost
+          -p$DBPASSWORD > backup/db.sql
+
+          echo "SELECT * FROM information_schema.tables WHERE table_schema = 'bitnami_wordpress' AND table_name = 'wp_users' LIMIT 1;" > existTableQuery.sql
+
+          EXIST_TABLE=$(sudo /opt/bitnami/mysql/bin/mysql -u$DBUSER $DBNAME -h${RDS.Endpoint.Address} -p${MasterUserPassword} < existTableQuery.sql | wc -l)
+
+          if [ ! $EXIST_TABLE -gt 0 ]
+
+          then 
+              echo "Hay tablas"
+
+              sudo /opt/bitnami/mysql/bin/mysql -u$DBUSER $DBNAME -h${RDS.Endpoint.Address} -p${MasterUserPassword} < backup/db.sql
+
+              echo "sudo /opt/bitnami/mysql/bin/mysql -u$DBUSER $DBNAME -h${RDS.Endpoint.Address} -p${MasterUserPassword}"
+
+          fi
+
+          sudo sed -i 's/localhost:3306/${RDS.Endpoint.Address}:3306/g'
+          /opt/bitnami/apps/wordpress/htdocs/wp-config.php
+
+          sudo sed -i "s/$DBPASSWORD/${MasterUserPassword}/g"
+          /opt/bitnami/apps/wordpress/htdocs/wp-config.php
+
+          export DB_CONNECTION="${RDS.Endpoint.Address}"
+
+          echo "$DB_CONNECTION"
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: a7fc65fb-9f07-4d46-8072-8f162fa54ccb
+  TargetGroup:
+    Type: "AWS::ElasticLoadBalancingV2::TargetGroup"
+    Properties:
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 4065c5e7-9687-4050-a63d-4c357668088c
+  MyGroup:
+    Type: "AWS::AutoScaling::AutoScalingGroup"
+    Properties:
+      LaunchConfigurationName: !Ref LaunchConfig
+      VPCZoneIdentifier:
+        - !Ref Subnet1
+        - !Ref Subnet2
+      MinSize: !Ref NumberOfNodes
+      MaxSize: "5"
+      TargetGroupARNs:
+        - !Ref TargetGroup
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: f680a8d8-30ca-4715-9df2-6431d7da21fe
+  Subnet1:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-west-2b
+      CidrBlock: 10.0.0.0/24
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: ac080661-23bc-47b7-8e5b-2dc464feb305
+  Subnet2:
+    Type: "AWS::EC2::Subnet"
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: us-west-2c
+      CidrBlock: 10.0.1.0/24
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: a95fd274-f91f-4b00-a279-e606d3cb6c4c
+  SubnetDB:
+    Type: "AWS::RDS::DBSubnetGroup"
+    Properties:
+      DBSubnetGroupDescription: Subnet database
+      SubnetIds:
+        - !Ref Subnet1
+        - !Ref Subnet2
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 4bed4183-1afc-4932-a705-e2a72423b0e2
+  VPC:
+    Type: "AWS::EC2::VPC"
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: "true"
+      EnableDnsHostnames: "true"
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+  Route:
+    Type: "AWS::EC2::Route"
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId:
+        Ref: RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId:
+        Ref: InternetGateway
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: b3cb04cc-4b4c-45e8-8643-4db968b270b9
+  RouteTable:
+    Type: "AWS::EC2::RouteTable"
+    Properties:
+      VpcId:
+        Ref: VPC
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 59640a69-4059-4a9f-bce9-c0e32aa5c75c
+  RouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet1
+  RouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref RouteTable
+      SubnetId: !Ref Subnet2
+  ELBV2:
+    Type: "AWS::ElasticLoadBalancingV2::LoadBalancer"
+    Properties:
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !Ref InstanceSecurityGroup
+      Subnets:
+        - !Ref Subnet1
+        - !Ref Subnet2
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 0cf29ef6-cf06-4bbc-926f-cbb28c02b09b
+  ALBListener:
+    Type: "AWS::ElasticLoadBalancingV2::Listener"
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref ELBV2
+      Port: "80"
+      Protocol: HTTP
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 8614c8a4-f5c8-451f-8076-b9ffae186cfb
+  NatGatewayEIP:
+    Type: "AWS::EC2::EIP"
+    Properties:
+      Domain: vpc
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 6641c921-9590-40d9-8e1c-6a33fa2e2964
+  NAT:
+    Type: "AWS::EC2::NatGateway"
+    Properties:
+      AllocationId: !GetAtt
+        - NatGatewayEIP
+        - AllocationId
+      SubnetId: !Ref Subnet1
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 2f2b02fa-349f-4e92-a39e-56afa4c81748
+  InternetGateway:
+    Type: "AWS::EC2::InternetGateway"
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 33b214ed-71a6-428f-b153-39d1b68bb4f1
+  InternetGatewayAttachment:
+    Type: "AWS::EC2::VPCGatewayAttachment"
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+    Metadata:
+      "AWS::CloudFormation::Designer":
+        id: 1b339868-7a6d-4bc6-a3ca-27b894953b8c
+Outputs:
+  URL:
+    Description: URL of the website
+    Value: !Join
+      - ""
+      - - "http://"
+        - !GetAtt
+          - ELBV2
+          - DNSName
+Metadata:
+  "AWS::CloudFormation::Designer":
+    33b214ed-71a6-428f-b153-39d1b68bb4f1:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 900
+        "y": 90
+      z: 1
+      embeds: []
+    6641c921-9590-40d9-8e1c-6a33fa2e2964:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 1020
+        "y": 90
+      z: 1
+      embeds: []
+    fe784ddb-9475-4c9e-976e-11ede60ae1e4:
+      size:
+        width: 780
+        height: 690
+      position:
+        x: 60
+        "y": 90
+      z: 1
+      embeds:
+        - 59640a69-4059-4a9f-bce9-c0e32aa5c75c
+        - a95fd274-f91f-4b00-a279-e606d3cb6c4c
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+        - 4065c5e7-9687-4050-a63d-4c357668088c
+        - e4d2d873-ddda-456e-86b3-5ecc4084178f
+        - e18086cc-140c-4936-8e29-b783fb27b619
+    1b339868-7a6d-4bc6-a3ca-27b894953b8c:
+      source:
+        id: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+      target:
+        id: 33b214ed-71a6-428f-b153-39d1b68bb4f1
+      z: 1
+    59640a69-4059-4a9f-bce9-c0e32aa5c75c:
+      size:
+        width: 240
+        height: 240
+      position:
+        x: 480
+        "y": 150
+      z: 2
+      parent: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+      embeds:
+        - b3cb04cc-4b4c-45e8-8643-4db968b270b9
+      iscontainedinside:
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+    b3cb04cc-4b4c-45e8-8643-4db968b270b9:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 510
+        "y": 210
+      z: 3
+      parent: 59640a69-4059-4a9f-bce9-c0e32aa5c75c
+      embeds: []
+      isassociatedwith:
+        - 33b214ed-71a6-428f-b153-39d1b68bb4f1
+      iscontainedinside:
+        - 59640a69-4059-4a9f-bce9-c0e32aa5c75c
+        - 59640a69-4059-4a9f-bce9-c0e32aa5c75c
+      dependson:
+        - 1b339868-7a6d-4bc6-a3ca-27b894953b8c
+    a95fd274-f91f-4b00-a279-e606d3cb6c4c:
+      size:
+        width: 150
+        height: 150
+      position:
+        x: 480
+        "y": 450
+      z: 2
+      parent: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+      embeds: []
+      iscontainedinside:
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+    ac080661-23bc-47b7-8e5b-2dc464feb305:
+      size:
+        width: 330
+        height: 330
+      position:
+        x: 90
+        "y": 150
+      z: 2
+      parent: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+      embeds:
+        - 2f2b02fa-349f-4e92-a39e-56afa4c81748
+        - 188b4284-14a6-47c2-8cd5-0f52e44409e9
+        - 000b4219-57fd-4147-9c20-8173dfbb154a
+      iscontainedinside:
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+    2f2b02fa-349f-4e92-a39e-56afa4c81748:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 120
+        "y": 210
+      z: 3
+      parent: ac080661-23bc-47b7-8e5b-2dc464feb305
+      embeds: []
+      iscontainedinside:
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+    4bed4183-1afc-4932-a705-e2a72423b0e2:
+      size:
+        width: 240
+        height: 240
+      position:
+        x: 60
+        "y": 840
+      z: 1
+      embeds:
+        - 1eaa0390-5087-469d-96bf-592ec0fb0c47
+      iscontainedinside:
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+        - a95fd274-f91f-4b00-a279-e606d3cb6c4c
+    4065c5e7-9687-4050-a63d-4c357668088c:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 690
+        "y": 450
+      z: 2
+      parent: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+      embeds: []
+      iscontainedinside:
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+    e4d2d873-ddda-456e-86b3-5ecc4084178f:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 90
+        "y": 540
+      z: 2
+      parent: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+      embeds: []
+      iscontainedinside:
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+    188b4284-14a6-47c2-8cd5-0f52e44409e9:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 240
+        "y": 210
+      z: 3
+      parent: ac080661-23bc-47b7-8e5b-2dc464feb305
+      embeds: []
+      isassociatedwith:
+        - e4d2d873-ddda-456e-86b3-5ecc4084178f
+      iscontainedinside:
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+    0cf29ef6-cf06-4bbc-926f-cbb28c02b09b:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 900
+        "y": 210
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - e4d2d873-ddda-456e-86b3-5ecc4084178f
+      iscontainedinside:
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+        - a95fd274-f91f-4b00-a279-e606d3cb6c4c
+    8614c8a4-f5c8-451f-8076-b9ffae186cfb:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 1020
+        "y": 210
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - 0cf29ef6-cf06-4bbc-926f-cbb28c02b09b
+    e18086cc-140c-4936-8e29-b783fb27b619:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 210
+        "y": 540
+      z: 2
+      parent: fe784ddb-9475-4c9e-976e-11ede60ae1e4
+      embeds: []
+      iscontainedinside:
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+        - fe784ddb-9475-4c9e-976e-11ede60ae1e4
+    1eaa0390-5087-469d-96bf-592ec0fb0c47:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 90
+        "y": 900
+      z: 2
+      parent: 4bed4183-1afc-4932-a705-e2a72423b0e2
+      embeds: []
+      isassociatedwith:
+        - e18086cc-140c-4936-8e29-b783fb27b619
+      iscontainedinside:
+        - 4bed4183-1afc-4932-a705-e2a72423b0e2
+        - 4bed4183-1afc-4932-a705-e2a72423b0e2
+    000b4219-57fd-4147-9c20-8173dfbb154a:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 120
+        "y": 330
+      z: 3
+      parent: ac080661-23bc-47b7-8e5b-2dc464feb305
+      embeds: []
+      iscontainedinside:
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+    8b8c5506-6d2b-4278-81bd-7452be1a2350:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 900
+        "y": 330
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - 000b4219-57fd-4147-9c20-8173dfbb154a
+    1d9f866b-64d8-42db-b5b3-859dfedeac76:
+      source:
+        id: 8b8c5506-6d2b-4278-81bd-7452be1a2350
+      target:
+        id: 188b4284-14a6-47c2-8cd5-0f52e44409e9
+      z: 3
+    a7fc65fb-9f07-4d46-8072-8f162fa54ccb:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 1020
+        "y": 330
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - 000b4219-57fd-4147-9c20-8173dfbb154a
+        - e4d2d873-ddda-456e-86b3-5ecc4084178f
+    f680a8d8-30ca-4715-9df2-6431d7da21fe:
+      size:
+        width: 60
+        height: 60
+      position:
+        x: 900
+        "y": 450
+      z: 1
+      embeds: []
+      isassociatedwith:
+        - a7fc65fb-9f07-4d46-8072-8f162fa54ccb
+        - 4065c5e7-9687-4050-a63d-4c357668088c
+      iscontainedinside:
+        - ac080661-23bc-47b7-8e5b-2dc464feb305
+        - a95fd274-f91f-4b00-a279-e606d3cb6c4c
