@@ -49,7 +49,7 @@ The parameters of the CloudFormation are:
 Steps to deploy using the AWS CLI:
 
 * *Prerequisite*: install the AWS CLI in your system following [the official steps.](https://docs.aws.amazon.com/cli/latest/userguide/cli-chap-install.html)
-* Download the [CloudFormation template](https://github.com/Mauraza/cloudformation-wp/wordpress-bitnami.yaml).
+* Download the [CloudFormation template](wordpress-bitnami.yaml).
 * Execute in your command line the following command:
 
 ```bash
